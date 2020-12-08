@@ -28,6 +28,7 @@ except:
 
 x_scalar = 1
 y_scalar = 1
+z_scalar = 1
 
 x_slop = 360*5 # the amount to go extra when changing direction
 y_slop = 360*2.5
@@ -62,6 +63,8 @@ inch_to_degrees = (9063.529411764706, 6480.0)
 pen_light_offset = (35*360, 0) # if the light is at the edge of the paper, move this vector to get the pen where the light currently is
 paper_brightness = 415
 step_size = 360 # used for diagonal and circle lines
+follow_motor_movement_tries = 1000 # how many steps should the follow motor wait for the lead motor to move at all?
+lead_motor_minimum_movement = 5 # if it doesn't move five degrees it's probably not moving at all
 
 power_level_range = (40, 100)
 
@@ -101,7 +104,7 @@ def zero_z():
 	#    mz.idle()
 	if not bz.get_sample():
 		# then it's not already zeroed
-		mz.run(power=100)
+		mz.run(power=-100 * z_scalar)
 		while not bz.get_sample():
 			pass # just wait for it to hit
 		mz.idle()
@@ -109,7 +112,7 @@ def zero_z():
 	print("Z axis zeroed")
 
 def pen_down():
-	mz.run(power=-100)
+	mz.run(power=100 * z_scalar)
 	time.sleep(.25)
 	mz.idle()
 	coords[2] = 0
@@ -302,12 +305,12 @@ def handle_slop(dx, dy):
 			my.turn(sign(dy) * y_scalar * 100, y_slop)
 			y_previous_direction = sign(dy)
 	
-def pair_motors(power_level, x, y, z):
+def pair_motors(power_level, x, y, z, tries = 1):
 	# this will calculate and move the motors correctly to get diagonal lines etc.
 	dx = x - coords[0]
 	dy = y - coords[1]
 	if dx == 0 and dy == 0:
-		handle_pen(z)
+		handle_pen_height(z)
 		return # already there!
 	# handle the pen
 	handle_pen_height(z)
@@ -319,6 +322,8 @@ def pair_motors(power_level, x, y, z):
 	smaller_motor = my
 	larger_scalar = x_scalar
 	smaller_scalar = y_scalar
+	larger_coord_index = 0 # this is for updating the coords after the motors finish moving
+	smaller_coord_index = 1
 	power_level = abs(power_level)
 	if abs(dx) < abs(dy):
 		# then swap them!
@@ -328,17 +333,19 @@ def pair_motors(power_level, x, y, z):
 		smaller_motor = mx
 		larger_scalar = y_scalar
 		smaller_scalar = x_scalar
+		larger_coord_index = 1
+		smaller_coord_index = 0
 	# now we need to calculate the ratio of movement
 	ratio = abs(smaller / larger)
 	if ratio == 0:
 		# then one of the motors isn't moving at all, only move the larger one which actually moves
-		l_thread = threading.Thread(target=lead_motor, args=(larger_motor, sign(larger)*larger_scalar*power_level, abs(larger)))
+		l_thread = threading.Thread(target=lead_motor, args=(larger_motor, sign(larger)*larger_scalar*power_level, abs(larger), larger_coord_index))
 		l_thread.start()
 		l_thread.join()
 	elif abs(ratio) == 1:
 		# then it's a straight diagonal line which we can handle with two lead motors
-		x_thread = threading.Thread(target=lead_motor, args=(mx, sign(dx)*x_scalar*power_level, abs(dx)))
-		y_thread = threading.Thread(target=lead_motor, args=(my, sign(dy)*y_scalar*power_level, abs(dy)))
+		x_thread = threading.Thread(target=lead_motor, args=(mx, sign(dx)*x_scalar*power_level, abs(dx), 0))
+		y_thread = threading.Thread(target=lead_motor, args=(my, sign(dy)*y_scalar*power_level, abs(dy), 1))
 	
 		x_thread.start()
 		y_thread.start()
@@ -347,8 +354,8 @@ def pair_motors(power_level, x, y, z):
 		y_thread.join()
 	else:
 		# it's a weird line...
-		l_thread = threading.Thread(target=lead_motor, args=(larger_motor, sign(larger)*larger_scalar*power_level, abs(larger)))
-		s_thread = threading.Thread(target=follow_motor, args=(smaller_motor, larger_motor, larger_motor.get_tacho(), ratio, sign(smaller)*smaller_scalar*power_level, abs(smaller)))
+		l_thread = threading.Thread(target=lead_motor, args=(larger_motor, sign(larger)*larger_scalar*power_level, abs(larger), larger_coord_index))
+		s_thread = threading.Thread(target=follow_motor, args=(smaller_motor, larger_motor, larger_motor.get_tacho(), ratio, sign(smaller)*smaller_scalar*power_level, abs(smaller), smaller_coord_index))
 		# follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio, power_level, distance):
 		
 		#x_thread = threading.Thread(target=lead_motor, args=(mx, sign(dx)*x_scalar*100, abs(dx)))
@@ -362,12 +369,31 @@ def pair_motors(power_level, x, y, z):
 		l_thread.join()
 		s_thread.join()
 		#y_thread.join() 
-	coords[0] = x
-	coords[1] = y
+	# coords[0] = x # the positions should now be updated by the threads, so we don't need to update them here
+	# coords[1] = y
+	# check if it actually made it, and if not and you have more tries try again!
+	tries -= 1
+	if coords[0] != x or coords[1] != y:
+		if tries > 0:
+			# try again
+			pair_motors(power_level, x, y, z, tries):
+		else:
+			print("Error: Didn't make it to coordinates. Goal: ("+str(x) + ", " + str(y) + ", " + str(z) + ")", "made it to:", coords)
 		
-def lead_motor(motor_to_control, power_level, distance):
+def lead_motor(motor_to_control, power_level, distance, coord_index):
 	# this just moves the motor as normal
-	motor_to_control.turn(power_level, distance)
+	start_tacho = motor_to_control.get_tacho().__dict__["rotation_count"]
+	try:
+		motor_to_control.turn(power_level, distance)
+	except Exception as e::
+		print("ERROR on Lead Motor!")
+		print(e)
+		sys.stdout.flush()
+	end_tacho = motor_to_control.get_tacho().__dict__["rotation_count"]
+	# now we need to figure out how far we actually made it and update the coordinates!
+	dpos = end_tacho - start_tacho
+	coords[coord_index] += dpos # update the position!
+
 
 def test_listen_to_tacho_thread(motor_to_watch, initial_tacho, power_level, distance):
 	for i in range(100):
@@ -387,22 +413,33 @@ ratio -- smaller_distance/larger_distance -- used for calculating when to move
 power_level -- should be signed in the direction of movement, probably 100 or -100
 distance -- always positive, the number of degrees of movement
 """
-def follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio, power_level, distance):
+def follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio, power_level, distance, coord_index):
 	# this function is used to drive this motor slower than the other motor to create a diagonal line
 	# this function will just wait until the other motor will make progress and then continue
 	if distance == 0:
 		return # we've made it! no more movement
+	controlled_start_position = motor_to_control.get_tacho().__dict__["rotation_count"] # this is used for updating the coords if we have issues
 	start = initial_watched_tacho.__dict__["rotation_count"]
 	current = initial_watched_tacho.__dict__["rotation_count"]
 	curr_watched_delta = 0
 	# here we just go and keep checking until it gets there I guess?
 	moved_distance = 0
 	is_final_step = (distance - moved_distance) <= step_size * 2 # if you have less then two steps to go then just move all the way
-	#print("Starting follow motor. Distance is: " + str(distance) +" Is Final Step: " + str(is_final_step))
-	#sys.stdout.flush()
+
+	num_checks_not_moved = 0 # this is used to break out of the loop if the main motor is no longer moving!
 	while moved_distance < distance:
 		# while we still have more distance to move, check how far the other motor has moved!
-		current = motor_to_watch.get_tacho().__dict__["rotation_count"]
+		new_position = motor_to_watch.get_tacho().__dict__["rotation_count"]
+		if abs(current - new_position) > lead_motor_minimum_movement:
+			num_checks_not_moved = 0
+		else:
+			num_checks_not_moved += 1 # it didn't move enough so we have a chance of leaving this loop early
+		if num_checks_not_moved > follow_motor_movement_tries:
+			print("Error on follow motor")
+			print("Lead motor didn't move enough after " + str(num_checks_not_moved) + " tries so broke out of loop")
+			sys.stdout.flush()
+			break # we skip out early!
+		current = new_position
 		curr_watched_delta = abs(current - start)
 		to_move = curr_watched_delta * ratio - moved_distance
 		if abs(to_move) > step_size:
@@ -410,6 +447,7 @@ def follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio,
 			#sys.stdout.flush()
 			# then take a step!
 			# first check if we should just move all the way to the end though
+			# todo add try except in here to update the distance if it errors so it can try again
 			if is_final_step:
 				# then just move all the way
 				motor_to_control.turn(power_level, distance - moved_distance)
@@ -420,13 +458,36 @@ def follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio,
 				moved_distance += step_size
 				# then update the is_final_step value to see if the next step will be the final step
 				is_final_step = (distance - moved_distance) <= step_size * 2
+	# here we check to see if we made it the full distance
+	if moved_distance == distance:
+		# then we're all set and we can set our position and leave!
+		coords[coord_index] += distance * sign(power_level) # we moved the correct amount
+		return
+	else:
+		# we need to make up the difference since we may have errored or something, just try to drive to the end
+		# and use the tacho to figure out how far we actually moved in case it errors
+		try:
+			motor_to_control.turn(power_level, distance - moved_distance)
+		except Exception as e:
+			# if we error on actually accomplishing this then print what happened
+			print("ERROR on Follow Motor!")
+			print(e)
+			sys.stdout.flush()
+			end_tacho = motor_to_control.get_tacho().__dict__["rotation_count"]
+			distance_moved = end_tacho - controlled_start_position
+			# now update the coords!
+			coords[coord_index] += distance_moved
+		else:
+			# we succeeded in completing the movement!
+			print("Follow motor completed movement after erroring out of loop")
 
 def stop_all_motors():
 	mx.idle()
 	my.idle()
 	mz.idle()
 
-def test_run_g_code(string, run=False):
+def test_run_g_code(string, start_from = 0, run=False):
+	# start_from is the index of the instruction to start from! It'll skip each valid instruction until it reaches that point
 	# the string is g-code, each line is a new instruction
 	run = run and b != None # you can only actually run this script if we have a brick located!
 	lines = string.split("\n")
@@ -439,6 +500,7 @@ def test_run_g_code(string, run=False):
 	max_degree_coords = [-math.inf, -math.inf, -math.inf]
 	min_degree_coords = [math.inf, math.inf, math.inf]
 	absolute_positioning = True # False = relative, True = absolute
+	instruction_index = -1 # this gets incremented before it gets checked so it should be -1
 	for line in lines:
 		# interpret the command!
 		if len(line) == 0:
@@ -447,6 +509,9 @@ def test_run_g_code(string, run=False):
 		if len(command) == 0:
 			continue
 		# figure out what the command is!
+		instruction_index += 1
+		if instruction_index < start_from:
+			continue
 		code = command[0].lower()
 		for c in command:
 			c = c.lower()
@@ -467,18 +532,21 @@ def test_run_g_code(string, run=False):
 		for i in range(len(max_degree_coords)):
 			max_degree_coords[i] = max(max_degree_coords[i], scaled_coords[i])
 			min_degree_coords[i] = min(min_degree_coords[i], scaled_coords[i])
-		
+		print(instruction_index, end = ": ")
 		# then actually check and run the commands!
+		# todo make it so that it checks the coordinates after the pair_motors is run so it knows if it actually made it within a step or it can try again
 		if code == "g0" or code == "g00":
 			# then it's rapid movement
 			print("G0", scaled_coords)
 			if run:
-				pair_motors(100, scaled_coords[0], scaled_coords[1], scaled_coords[2])
+				pair_motors(100, scaled_coords[0], scaled_coords[1], scaled_coords[2], tries = 10)
 		elif code == "g1" or code == "g01":
 			# then we're moving the head for an operation, which for us is identical to rapid movement
 			print("G1", scaled_coords)
 			if run:
-				pair_motors(100, scaled_coords[0], scaled_coords[1], scaled_coords[2])
+				pair_motors(100, scaled_coords[0], scaled_coords[1], scaled_coords[2], tries = 10)
+		else:
+			print(code, "is unhandled") # just add the new line
 	print("Max Degree Coords", str(max_degree_coords))
 	print("Min Degree Coords", str(min_degree_coords))
 		
@@ -490,7 +558,7 @@ def open_test_gcode_file(file = "test_files/JOutside.gcode"):
 	f = open(full_path)
 	l = f.read()
 	return l
-		
+	
 
 # general setup for a drawing:
 # put it so the y axle is over the top edge of the paper, and the light sensor is over the backdrop in order to detect the edge
@@ -504,4 +572,4 @@ if b != None:
 	# I reccomend using http://jscut.org/jscut.html to convert SVGs to g-code
 
 s = open_test_gcode_file()
-test_run_g_code(s)
+test_run_g_code(s, start_from = 0)
