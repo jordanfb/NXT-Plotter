@@ -63,14 +63,14 @@ inch_to_degrees = (9063.529411764706, 6480.0)
 pen_light_offset = (35*360, 0) # if the light is at the edge of the paper, move this vector to get the pen where the light currently is
 paper_brightness = 415
 step_size = 360 # used for diagonal and circle lines
-follow_motor_movement_tries = 1000 # how many steps should the follow motor wait for the lead motor to move at all?
+follow_motor_movement_tries = 50 # how many steps should the follow motor wait for the lead motor to move at all?
 lead_motor_minimum_movement = 5 # if it doesn't move five degrees it's probably not moving at all
 
 power_level_range = (40, 100)
 
 
 # g-code interpretation settings:
-g_code_scale = 4
+g_code_scale = .93
 add_paper_offsets_to_coords = True
 g_code_additional_offset = [5000, 5000]
 
@@ -376,7 +376,7 @@ def pair_motors(power_level, x, y, z, tries = 1):
 	if coords[0] != x or coords[1] != y:
 		if tries > 0:
 			# try again
-			pair_motors(power_level, x, y, z, tries):
+			pair_motors(power_level, x, y, z, tries-1)
 		else:
 			print("Error: Didn't make it to coordinates. Goal: ("+str(x) + ", " + str(y) + ", " + str(z) + ")", "made it to:", coords)
 		
@@ -385,7 +385,7 @@ def lead_motor(motor_to_control, power_level, distance, coord_index):
 	start_tacho = motor_to_control.get_tacho().__dict__["rotation_count"]
 	try:
 		motor_to_control.turn(power_level, distance)
-	except Exception as e::
+	except Exception as e:
 		print("ERROR on Lead Motor!")
 		print(e)
 		sys.stdout.flush()
@@ -480,6 +480,7 @@ def follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio,
 		else:
 			# we succeeded in completing the movement!
 			print("Follow motor completed movement after erroring out of loop")
+			coords[coord_index] += distance * sign(power_level)
 
 def stop_all_motors():
 	mx.idle()
@@ -551,7 +552,7 @@ def test_run_g_code(string, start_from = 0, run=False):
 	print("Min Degree Coords", str(min_degree_coords))
 		
 		
-def open_test_gcode_file(file = "test_files/JOutside.gcode"):
+def open_test_gcode_file(file = "test_files/spaceship_portrait_gcode.gcode"):
 	script_path = sys.argv[0]
 	dir_path = os.path.dirname(script_path)
 	full_path = os.path.join(dir_path, file)
@@ -572,4 +573,4 @@ if b != None:
 	# I reccomend using http://jscut.org/jscut.html to convert SVGs to g-code
 
 s = open_test_gcode_file()
-test_run_g_code(s, start_from = 0)
+#test_run_g_code(s, start_from = 0)
