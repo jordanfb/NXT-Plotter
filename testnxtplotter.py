@@ -4,6 +4,22 @@ import threading
 import time
 import sys
 import os # for file paths for the g-code
+import Queue
+
+"""
+Current issues:
+It goes back and forth repeatedly trying to find the right coordinates
+It tries to move even when the movement is too small to really matter (maybe? Perhaps like if it's less than 90 degrees don't do it?)
+When the lead motor is finished the follow motor needs to automatically finish instead of waiting and erroring.
+"Error didn't make it to coordinates"
+
+it seems like there are two options, either I update the coordinates based on the actual tacho changes, or I update the coordinates based on what was supposed
+to have happened. I feel like the tachos are more accurate than nothing probably? So it's likely better than flying by wire, but I'm not certain.
+Maybe a boolean that toggles between the modes?
+Then again, if the tacho is accurate, why not use it? That makes sense to me
+The only thing is I have to make sure to handle it not moving enough if there's only a sub step sized change or something because those errors can then accumulate.
+
+"""
 
 b = None
 mx = None
@@ -65,6 +81,7 @@ paper_brightness = 415
 step_size = 360 # used for diagonal and circle lines
 follow_motor_movement_tries = 50 # how many steps should the follow motor wait for the lead motor to move at all?
 lead_motor_minimum_movement = 5 # if it doesn't move five degrees it's probably not moving at all
+minimum_movement_distance = step_size/2.
 
 power_level_range = (40, 100)
 
@@ -309,6 +326,11 @@ def pair_motors(power_level, x, y, z, tries = 1):
 	# this will calculate and move the motors correctly to get diagonal lines etc.
 	dx = x - coords[0]
 	dy = y - coords[1]
+	# don't move if it's less than the step size, it won't end particularly well
+	if abs(dx) < minimum_movement_distance:
+		dx = 0
+	if abs(dy) < minimum_movement_distance:
+		dy = 0
 	if dx == 0 and dy == 0:
 		handle_pen_height(z)
 		return # already there!
@@ -354,8 +376,9 @@ def pair_motors(power_level, x, y, z, tries = 1):
 		y_thread.join()
 	else:
 		# it's a weird line...
-		l_thread = threading.Thread(target=lead_motor, args=(larger_motor, sign(larger)*larger_scalar*power_level, abs(larger), larger_coord_index))
-		s_thread = threading.Thread(target=follow_motor, args=(smaller_motor, larger_motor, larger_motor.get_tacho(), ratio, sign(smaller)*smaller_scalar*power_level, abs(smaller), smaller_coord_index))
+		leader_finished_queue = Queue.Queue()
+		l_thread = threading.Thread(target=lead_motor, args=(larger_motor, sign(larger)*larger_scalar*power_level, abs(larger), larger_coord_index, finished_queue = leader_finished_queue))
+		s_thread = threading.Thread(target=follow_motor, args=(smaller_motor, larger_motor, larger_motor.get_tacho(), ratio, sign(smaller)*smaller_scalar*power_level, abs(smaller), smaller_coord_index, finished_queue = leader_finished_queue))
 		# follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio, power_level, distance):
 		
 		#x_thread = threading.Thread(target=lead_motor, args=(mx, sign(dx)*x_scalar*100, abs(dx)))
@@ -372,15 +395,16 @@ def pair_motors(power_level, x, y, z, tries = 1):
 	# coords[0] = x # the positions should now be updated by the threads, so we don't need to update them here
 	# coords[1] = y
 	# check if it actually made it, and if not and you have more tries try again!
-	tries -= 1
-	if coords[0] != x or coords[1] != y:
-		if tries > 0:
-			# try again
-			pair_motors(power_level, x, y, z, tries-1)
-		else:
-			print("Error: Didn't make it to coordinates. Goal: ("+str(x) + ", " + str(y) + ", " + str(z) + ")", "made it to:", coords)
+	# we're actually removing this since this doesn't work well and just makes it go back and forth repeatedly
+	# tries -= 1
+	# if coords[0] != x or coords[1] != y:
+	# 	if tries > 0:
+	# 		# try again
+	# 		pair_motors(power_level, x, y, z, tries-1)
+	# 	else:
+	# 		print("Error: Didn't make it to coordinates. Goal: ("+str(x) + ", " + str(y) + ", " + str(z) + ")", "made it to:", coords)
 		
-def lead_motor(motor_to_control, power_level, distance, coord_index):
+def lead_motor(motor_to_control, power_level, distance, coord_index, finished_queue = None):
 	# this just moves the motor as normal
 	start_tacho = motor_to_control.get_tacho().__dict__["rotation_count"]
 	try:
@@ -393,6 +417,8 @@ def lead_motor(motor_to_control, power_level, distance, coord_index):
 	# now we need to figure out how far we actually made it and update the coordinates!
 	dpos = end_tacho - start_tacho
 	coords[coord_index] += dpos # update the position!
+	if finished_queue != None:
+		q.put(True) # it's finished, and that's all we need for now I guess
 
 
 def test_listen_to_tacho_thread(motor_to_watch, initial_tacho, power_level, distance):
@@ -413,7 +439,7 @@ ratio -- smaller_distance/larger_distance -- used for calculating when to move
 power_level -- should be signed in the direction of movement, probably 100 or -100
 distance -- always positive, the number of degrees of movement
 """
-def follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio, power_level, distance, coord_index):
+def follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio, power_level, distance, coord_index, finished_queue = None):
 	# this function is used to drive this motor slower than the other motor to create a diagonal line
 	# this function will just wait until the other motor will make progress and then continue
 	if distance == 0:
@@ -427,7 +453,7 @@ def follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio,
 	is_final_step = (distance - moved_distance) <= step_size * 2 # if you have less then two steps to go then just move all the way
 
 	num_checks_not_moved = 0 # this is used to break out of the loop if the main motor is no longer moving!
-	while moved_distance < distance:
+	while moved_distance < distance and (finished_queue == None or finished_queue.empty()):
 		# while we still have more distance to move, check how far the other motor has moved!
 		new_position = motor_to_watch.get_tacho().__dict__["rotation_count"]
 		if abs(current - new_position) > lead_motor_minimum_movement:
@@ -479,7 +505,7 @@ def follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio,
 			coords[coord_index] += distance_moved
 		else:
 			# we succeeded in completing the movement!
-			print("Follow motor completed movement after erroring out of loop")
+			# print("Follow motor completed movement after erroring out of loop")
 			coords[coord_index] += distance * sign(power_level)
 
 def stop_all_motors():
