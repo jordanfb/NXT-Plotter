@@ -4,7 +4,7 @@ import threading
 import time
 import sys
 import os # for file paths for the g-code
-import Queue
+import queue
 
 """
 Current issues:
@@ -81,7 +81,7 @@ paper_brightness = 415
 step_size = 360 # used for diagonal and circle lines
 follow_motor_movement_tries = 50 # how many steps should the follow motor wait for the lead motor to move at all?
 lead_motor_minimum_movement = 5 # if it doesn't move five degrees it's probably not moving at all
-minimum_movement_distance = step_size/2.
+minimum_movement_distance = step_size/8.
 
 power_level_range = (40, 100)
 
@@ -376,9 +376,9 @@ def pair_motors(power_level, x, y, z, tries = 1):
 		y_thread.join()
 	else:
 		# it's a weird line...
-		leader_finished_queue = Queue.Queue()
-		l_thread = threading.Thread(target=lead_motor, args=(larger_motor, sign(larger)*larger_scalar*power_level, abs(larger), larger_coord_index, finished_queue = leader_finished_queue))
-		s_thread = threading.Thread(target=follow_motor, args=(smaller_motor, larger_motor, larger_motor.get_tacho(), ratio, sign(smaller)*smaller_scalar*power_level, abs(smaller), smaller_coord_index, finished_queue = leader_finished_queue))
+		leader_finished_queue = queue.Queue()
+		l_thread = threading.Thread(target=lead_motor, args=(larger_motor, sign(larger)*larger_scalar*power_level, abs(larger), larger_coord_index, leader_finished_queue))
+		s_thread = threading.Thread(target=follow_motor, args=(smaller_motor, larger_motor, larger_motor.get_tacho(), ratio, sign(smaller)*smaller_scalar*power_level, abs(smaller), smaller_coord_index, leader_finished_queue))
 		# follow_motor(motor_to_control, motor_to_watch, initial_watched_tacho, ratio, power_level, distance):
 		
 		#x_thread = threading.Thread(target=lead_motor, args=(mx, sign(dx)*x_scalar*100, abs(dx)))
@@ -418,7 +418,7 @@ def lead_motor(motor_to_control, power_level, distance, coord_index, finished_qu
 	dpos = end_tacho - start_tacho
 	coords[coord_index] += dpos # update the position!
 	if finished_queue != None:
-		q.put(True) # it's finished, and that's all we need for now I guess
+		finished_queue.put(True) # it's finished, and that's all we need for now I guess
 
 
 def test_listen_to_tacho_thread(motor_to_watch, initial_tacho, power_level, distance):
